@@ -1,0 +1,14 @@
+streamlit
+langchain
+langchain-openai
+langchain-community
+pypdf2
+faiss-cpu
+chromadb
+openai
+python-dotenv
+pandas
+numpy
+plotly
+streamlit-option-menu
+streamlit-chat
