@@ -11,6 +11,20 @@ from utils.vector_store import VectorStoreManager
 from utils.ai_helpers import AIHelpers
 from config import *
 
+# Resolve OpenAI API key: Streamlit secrets → env var → config.py
+resolved_api_key = None
+try:
+    # st.secrets may raise if not configured (e.g., local without secrets.toml)
+    resolved_api_key = st.secrets.get("OPENAI_API_KEY", None)  # type: ignore[attr-defined]
+except Exception:
+    resolved_api_key = None
+
+if not resolved_api_key:
+    resolved_api_key = os.getenv("OPENAI_API_KEY") or OPENAI_API_KEY
+
+if resolved_api_key:
+    os.environ["OPENAI_API_KEY"] = resolved_api_key
+
 # Page configuration
 st.set_page_config(
     page_title=APP_TITLE,
@@ -31,10 +45,10 @@ if 'ai_helpers' not in st.session_state:
     st.session_state.ai_helpers = AIHelpers()
 
 # Check API key configuration
-if not OPENAI_API_KEY:
+if not os.environ.get("OPENAI_API_KEY"):
     st.error("⚠️ OpenAI API key not configured!")
-    st.info("Please create a `.env` file in the project root and add your OpenAI API key:")
-    st.code("OPENAI_API_KEY=your_actual_api_key_here")
+    st.info("Set `OPENAI_API_KEY` in `.streamlit/secrets.toml` or as an environment variable.")
+    st.code('[secrets]\nOPENAI_API_KEY="sk-..."')
     st.stop()
 
 if 'chat_history' not in st.session_state:
