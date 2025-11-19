@@ -3,7 +3,7 @@ import pickle
 from typing import List, Dict, Any, Optional
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 import streamlit as st
 from config import OPENAI_API_KEY, VECTOR_STORE_PATH
 
