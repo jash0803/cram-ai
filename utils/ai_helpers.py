@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Optional
 from langchain_openai import ChatOpenAI
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 import streamlit as st
 from config import OPENAI_API_KEY
