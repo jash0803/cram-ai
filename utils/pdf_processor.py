@@ -66,3 +66,24 @@ class PDFProcessor:
             "chunk_count": len(chunks),
             "word_count": len(text.split())
         }
+
+    def process_text(self, text: str, source_name: str = "Manual Notes") -> Dict[str, Any]:
+        """Process raw text input and return structured data"""
+        cleaned_text = (text or "").strip()
+        if not cleaned_text:
+            return {
+                "filename": source_name,
+                "full_text": "",
+                "chunks": [],
+                "chunk_count": 0,
+                "word_count": 0
+            }
+        
+        chunks = self.chunk_text(cleaned_text)
+        return {
+            "filename": source_name,
+            "full_text": cleaned_text,
+            "chunks": chunks,
+            "chunk_count": len(chunks),
+            "word_count": len(cleaned_text.split())
+        }

@@ -19,10 +19,6 @@ CHUNK_OVERLAP = 200
 APP_TITLE = "🧠 CramAI – Study Smarter, Not Harder"
 APP_ICON = "📚"
 
-# Study Configuration
-DEFAULT_SUBJECTS = ["Mathematics", "Physics", "Chemistry", "Biology", "Computer Science", "History", "Literature", "Other"]
-DEFAULT_TOPICS = ["Chapter 1", "Chapter 2", "Chapter 3", "Chapter 4", "Chapter 5"]
-
 # Quiz Configuration
 QUIZ_DIFFICULTY_LEVELS = ["Easy", "Medium", "Hard"]
 QUIZ_TYPES = ["MCQ", "Objective", "Detailed Q&A", "Numerical/Problem-solving"]

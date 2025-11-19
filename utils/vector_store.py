@@ -1,14 +1,11 @@
 import os
 import pickle
-from typing import List, Dict, Any
-import faiss
-import numpy as np
+from typing import List, Dict, Any, Optional
 from langchain_openai import OpenAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
 import streamlit as st
-from config import OPENAI_API_KEY, VECTOR_STORE_PATH, CHUNK_SIZE, CHUNK_OVERLAP
+from config import OPENAI_API_KEY, VECTOR_STORE_PATH
 
 class VectorStoreManager:
     """Manages vector store operations for RAG system"""
@@ -28,9 +25,6 @@ class VectorStoreManager:
         for i, text in enumerate(texts):
             doc_metadata = {
                 "source": metadata.get("filename", "unknown"),
-                "subject": metadata.get("subject", "general"),
-                "topic": metadata.get("topic", "general"),
-                "chapter": metadata.get("chapter", "general"),
                 "chunk_id": i,
                 **metadata
             }
@@ -54,16 +48,23 @@ class VectorStoreManager:
                 # Add to existing vector store
                 self.vector_store.add_documents(new_documents)
             
-            # Update metadata
-            doc_id = f"{metadata.get('filename', 'unknown')}_{metadata.get('subject', 'general')}"
-            self.metadata[doc_id] = metadata
+            # Update metadata registry with a unique identifier
+            doc_id = metadata.get("document_id") or f"{metadata.get('filename', 'unknown')}_{len(self.metadata) + 1}"
+            metadata["document_id"] = doc_id
+            # Store a shallow copy to avoid Streamlit session mutations altering stored data
+            self.metadata[doc_id] = metadata.copy()
             
             st.success(f"Successfully added {len(new_documents)} chunks to vector store")
             
         except Exception as e:
             st.error(f"Error adding documents to vector store: {str(e)}")
     
-    def search_similar(self, query: str, k: int = 5, filter_dict: Dict = None) -> List[Document]:
+    def search_similar(
+        self,
+        query: str,
+        k: int = 5,
+        document_ids: Optional[List[str]] = None
+    ) -> List[Document]:
         """Search for similar documents"""
         if not self.embeddings:
             st.error("OpenAI API key not configured. Please set your API key in the .env file.")
@@ -73,23 +74,15 @@ class VectorStoreManager:
             if self.vector_store is None:
                 return []
             
-            if filter_dict:
-                # Filter documents by metadata
-                filtered_docs = []
-                for doc in self.documents:
-                    match = True
-                    for key, value in filter_dict.items():
-                        if doc.metadata.get(key) != value:
-                            match = False
-                            break
-                    if match:
-                        filtered_docs.append(doc)
-                
-                if not filtered_docs:
+            working_docs = self.documents
+            if document_ids:
+                working_docs = [
+                    doc for doc in self.documents
+                    if doc.metadata.get("document_id") in document_ids
+                ]
+                if not working_docs:
                     return []
-                
-                # Create temporary vector store for filtered docs
-                temp_store = FAISS.from_documents(filtered_docs, self.embeddings)
+                temp_store = FAISS.from_documents(working_docs, self.embeddings)
                 results = temp_store.similarity_search(query, k=k)
             else:
                 results = self.vector_store.similarity_search(query, k=k)
@@ -99,30 +92,6 @@ class VectorStoreManager:
         except Exception as e:
             st.error(f"Error searching vector store: {str(e)}")
             return []
-    
-    def get_all_subjects(self) -> List[str]:
-        """Get all unique subjects in the vector store"""
-        subjects = set()
-        for doc in self.documents:
-            subjects.add(doc.metadata.get("subject", "general"))
-        return sorted(list(subjects))
-    
-    def get_topics_by_subject(self, subject: str) -> List[str]:
-        """Get all topics for a specific subject"""
-        topics = set()
-        for doc in self.documents:
-            if doc.metadata.get("subject") == subject:
-                topics.add(doc.metadata.get("topic", "general"))
-        return sorted(list(topics))
-    
-    def get_chapters_by_topic(self, subject: str, topic: str) -> List[str]:
-        """Get all chapters for a specific subject and topic"""
-        chapters = set()
-        for doc in self.documents:
-            if (doc.metadata.get("subject") == subject and 
-                doc.metadata.get("topic") == topic):
-                chapters.add(doc.metadata.get("chapter", "general"))
-        return sorted(list(chapters))
     
     def save_vector_store(self, path: str = VECTOR_STORE_PATH):
         """Save vector store to disk"""
@@ -180,9 +149,35 @@ class VectorStoreManager:
     
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the vector store"""
+        total_documents = len(self.metadata)
         return {
-            "total_documents": len(self.documents),
-            "total_subjects": len(self.get_all_subjects()),
-            "subjects": self.get_all_subjects(),
+            "total_documents": total_documents,
+            "total_chunks": len(self.documents),
             "has_vector_store": self.vector_store is not None
         }
+
+    def get_document_library(self) -> List[Dict[str, Any]]:
+        """Return a summarized view of uploaded documents"""
+        library = []
+        for meta in self.metadata.values():
+            library.append({
+                "Document": meta.get("display_name") or meta.get("filename", "Untitled"),
+                "Tags": ", ".join(meta.get("tags", [])) if meta.get("tags") else "",
+                "Source Type": meta.get("source_type", "PDF"),
+                "Chunks": meta.get("chunk_count", 0),
+                "Words": meta.get("word_count", 0),
+                "Uploaded": meta.get("upload_date", "N/A"),
+                "Document ID": meta.get("document_id")
+            })
+        # Sort by upload date descending when possible
+        library.sort(key=lambda item: item.get("Uploaded", ""), reverse=True)
+        return library
+
+    def get_documents_by_ids(self, document_ids: List[str]) -> List[Document]:
+        """Return raw Document chunks that belong to specific uploads"""
+        if not document_ids:
+            return []
+        return [
+            doc for doc in self.documents
+            if doc.metadata.get("document_id") in document_ids
+        ]

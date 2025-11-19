@@ -1,7 +1,10 @@
 import streamlit as st
 import os
-import json
+import re
 from datetime import datetime, timedelta
+from uuid import uuid4
+
+import pandas as pd
 from streamlit_option_menu import option_menu
 from streamlit_chat import message
 
@@ -10,6 +13,72 @@ from utils.pdf_processor import PDFProcessor
 from utils.vector_store import VectorStoreManager
 from utils.ai_helpers import AIHelpers
 from config import *
+
+
+def sanitize_filename(*parts: str) -> str:
+    """Create a filesystem-friendly filename from provided parts."""
+    raw = "_".join([part for part in parts if part])
+    safe = re.sub(r"[^A-Za-z0-9_\-]+", "_", raw)
+    return safe.strip("_") or "export"
+
+
+def format_questions_markdown(questions):
+    """Convert generated questions into a markdown string for download."""
+    lines = []
+    for idx, question in enumerate(questions, 1):
+        lines.append(f"### Question {idx}")
+        lines.append(question.get("question", "N/A"))
+        
+        options = question.get("options")
+        if isinstance(options, dict):
+            lines.append("")
+            for key, value in options.items():
+                lines.append(f"- {key}. {value}")
+        
+        if question.get("answer"):
+            lines.append("")
+            lines.append(f"**Answer:** {question['answer']}")
+        
+        if question.get("correct_answer"):
+            lines.append("")
+            lines.append(f"**Correct Answer:** {question['correct_answer']}")
+        
+        if question.get("explanation"):
+            lines.append("")
+            lines.append(f"**Explanation:** {question['explanation']}")
+        
+        if question.get("solution"):
+            lines.append("")
+            lines.append("**Solution:**")
+            lines.append(question["solution"])
+        
+        if question.get("final_answer"):
+            lines.append("")
+            lines.append(f"**Final Answer:** {question['final_answer']}")
+        
+        lines.append("\n---\n")
+    
+    return "\n".join(lines).strip()
+
+
+def parse_tags(tag_string: str):
+    """Convert comma separated tags into a clean list."""
+    return [tag.strip() for tag in (tag_string or "").split(",") if tag.strip()]
+
+
+def get_relevant_documents(query: str, document_ids=None, k: int = 10):
+    """Helper to retrieve documents based on query and optional document filters."""
+    if 'vector_store' not in st.session_state:
+        return []
+    search_query = query or "study materials"
+    docs = st.session_state.vector_store.search_similar(
+        search_query,
+        k=k,
+        document_ids=document_ids if document_ids else None
+    )
+    if not docs and document_ids:
+        docs = st.session_state.vector_store.get_documents_by_ids(document_ids)
+    return docs
 
 # Page configuration (must be the first Streamlit call)
 st.set_page_config(
@@ -60,6 +129,15 @@ if 'quiz_results' not in st.session_state:
 if 'flashcard_progress' not in st.session_state:
     st.session_state.flashcard_progress = {}
 
+if 'study_plan' not in st.session_state:
+    st.session_state.study_plan = []
+
+if 'saved_summaries' not in st.session_state:
+    st.session_state.saved_summaries = []
+
+if 'saved_question_sets' not in st.session_state:
+    st.session_state.saved_question_sets = []
+
 # Main navigation
 with st.sidebar:
     selected = option_menu(
@@ -95,29 +173,11 @@ if selected == "📁 Upload & Organize":
             for uploaded_file in uploaded_files:
                 st.write(f"📄 {uploaded_file.name}")
                 
-                # Organization inputs
-                col_subject, col_topic, col_chapter = st.columns(3)
-                
-                with col_subject:
-                    subject = st.selectbox(
-                        f"Subject for {uploaded_file.name}",
-                        DEFAULT_SUBJECTS,
-                        key=f"subject_{uploaded_file.name}"
-                    )
-                
-                with col_topic:
-                    topic = st.text_input(
-                        f"Topic for {uploaded_file.name}",
-                        value="General",
-                        key=f"topic_{uploaded_file.name}"
-                    )
-                
-                with col_chapter:
-                    chapter = st.text_input(
-                        f"Chapter for {uploaded_file.name}",
-                        value="Chapter 1",
-                        key=f"chapter_{uploaded_file.name}"
-                    )
+                tag_input = st.text_input(
+                    f"Tags for {uploaded_file.name} (comma separated, optional)",
+                    value="",
+                    key=f"tags_{uploaded_file.name}"
+                )
                 
                 # Process button
                 if st.button(f"Process {uploaded_file.name}", key=f"process_{uploaded_file.name}"):
@@ -130,10 +190,13 @@ if selected == "📁 Upload & Organize":
                         # Add to vector store
                         metadata = {
                             "filename": uploaded_file.name,
-                            "subject": subject,
-                            "topic": topic,
-                            "chapter": chapter,
-                            "upload_date": datetime.now().isoformat()
+                            "display_name": uploaded_file.name,
+                            "tags": parse_tags(tag_input),
+                            "upload_date": datetime.now().isoformat(),
+                            "document_id": str(uuid4()),
+                            "word_count": processed_data["word_count"],
+                            "chunk_count": processed_data["chunk_count"],
+                            "source_type": "PDF"
                         }
                         
                         st.session_state.vector_store.add_documents(
@@ -145,133 +208,216 @@ if selected == "📁 Upload & Organize":
                         
                         st.success(f"✅ Successfully processed {uploaded_file.name}")
                         st.info(f"📊 Extracted {processed_data['chunk_count']} chunks, {processed_data['word_count']} words")
+        
+        st.markdown("---")
+        st.subheader("✍️ Add Quick Notes")
+        with st.form("manual_notes_form", clear_on_submit=True):
+            note_title = st.text_input("Title", value="My Notes")
+            note_tags = st.text_input("Tags (comma separated)", value="", key="notes_tags")
+            note_content = st.text_area("Write or paste your notes", height=200)
+            submitted_notes = st.form_submit_button("Save Notes to Library")
+        
+        if submitted_notes:
+            if not note_content.strip():
+                st.error("Please add some content before saving your notes.")
+            else:
+                with st.spinner("Adding notes to your library..."):
+                    processed_notes = st.session_state.pdf_processor.process_text(
+                        note_content,
+                        source_name=note_title or "Manual Notes"
+                    )
+                    metadata = {
+                        "filename": note_title or "Manual Notes",
+                        "display_name": note_title or "Manual Notes",
+                        "tags": parse_tags(note_tags),
+                        "upload_date": datetime.now().isoformat(),
+                        "document_id": str(uuid4()),
+                        "word_count": processed_notes["word_count"],
+                        "chunk_count": processed_notes["chunk_count"],
+                        "source_type": "Notes"
+                    }
+                    st.session_state.vector_store.add_documents(
+                        processed_notes["chunks"],
+                        metadata
+                    )
+                    st.success("✅ Notes saved successfully!")
     
     with col2:
         st.subheader("📊 Your Library")
         stats = st.session_state.vector_store.get_stats()
         
-        st.metric("Total Documents", stats["total_documents"])
-        st.metric("Subjects", stats["total_subjects"])
+        st.metric("Total Documents", stats.get("total_documents", 0))
+        st.metric("Total Chunks", stats.get("total_chunks", 0))
         
-        if stats["subjects"]:
-            st.write("**Subjects:**")
-            for subject in stats["subjects"]:
-                st.write(f"• {subject}")
+        library_data = st.session_state.vector_store.get_document_library()
+        
+        st.markdown("### 📚 Library Details")
+        if library_data:
+            library_df = pd.DataFrame(library_data)
+            search_query = st.text_input("Search by title or tags", "")
+            
+            filtered_df = library_df.copy().fillna("")
+            if search_query:
+                mask = filtered_df["Document"].str.contains(search_query, case=False, na=False) | \
+                       filtered_df["Tags"].str.contains(search_query, case=False, na=False)
+                filtered_df = filtered_df[mask]
+            
+            st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+            
+            csv_bytes = filtered_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download library snapshot (.csv)",
+                data=csv_bytes,
+                file_name=f"{sanitize_filename('cram_ai_library', datetime.now().isoformat())}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("No documents or notes added yet. Upload a PDF or add quick notes to get started.")
 
 # Study Tools Page
 elif selected == "📚 Study Tools":
     st.title("📚 AI Study Tools")
     
-    # Get available subjects
-    subjects = st.session_state.vector_store.get_all_subjects()
+    library_data = st.session_state.vector_store.get_document_library()
+    doc_lookup = {
+        f"{entry['Document']} ({entry['Document ID']})": entry["Document ID"]
+        for entry in library_data
+        if entry.get("Document ID")
+    }
     
-    if not subjects:
-        st.warning("No documents uploaded yet. Please upload some PDFs first.")
+    if not library_data:
+        st.warning("No documents uploaded yet. Please upload some PDFs or add notes first.")
     else:
-        col1, col2 = st.columns([1, 2])
+        focus_col, docs_col = st.columns([2, 1])
         
-        with col1:
-            selected_subject = st.selectbox("Select Subject", subjects)
-            
-            # Get topics for selected subject
-            topics = st.session_state.vector_store.get_topics_by_subject(selected_subject)
-            selected_topic = st.selectbox("Select Topic", topics) if topics else None
-            
-            # Get chapters for selected topic
-            if selected_topic:
-                chapters = st.session_state.vector_store.get_chapters_by_topic(selected_subject, selected_topic)
-                selected_chapter = st.selectbox("Select Chapter", chapters) if chapters else None
-            else:
-                selected_chapter = None
+        with focus_col:
+            study_focus = st.text_input(
+                "Describe what you want to study",
+                value="Key concepts from my materials"
+            )
         
-        with col2:
-            if selected_subject and selected_topic and selected_chapter:
-                # Filter documents
-                filter_dict = {
-                    "subject": selected_subject,
-                    "topic": selected_topic,
-                    "chapter": selected_chapter
-                }
-                
-                # Get relevant documents
-                relevant_docs = st.session_state.vector_store.search_similar(
-                    f"{selected_subject} {selected_topic} {selected_chapter}",
-                    k=10,
-                    filter_dict=filter_dict
-                )
-                
-                if relevant_docs:
-                    st.subheader("📖 Content Summary")
+        with docs_col:
+            selected_doc_labels = st.multiselect(
+                "Limit to uploads (optional)",
+                options=list(doc_lookup.keys())
+            )
+            selected_doc_ids = [doc_lookup[label] for label in selected_doc_labels]
+        
+        relevant_docs = get_relevant_documents(study_focus, document_ids=selected_doc_ids, k=10)
+        
+        if relevant_docs:
+            focus_label = study_focus or "General Study Focus"
+            st.subheader("📖 Content Summary")
+            
+            summary_type = st.selectbox("Summary Type", SUMMARY_TYPES)
+            
+            if st.button("Generate Summary"):
+                with st.spinner("Generating summary..."):
+                    summary = st.session_state.ai_helpers.generate_summary(
+                        relevant_docs, summary_type
+                    )
+                    st.markdown("### Generated Summary")
+                    st.write(summary)
                     
-                    # Summary generation
-                    summary_type = st.selectbox("Summary Type", SUMMARY_TYPES)
+                    summary_record = {
+                        "focus": focus_label,
+                        "document_ids": selected_doc_ids,
+                        "summary_type": summary_type,
+                        "content": summary,
+                        "generated_at": datetime.now().isoformat()
+                    }
+                    st.session_state.saved_summaries.append(summary_record)
+                    filename = f"{sanitize_filename(focus_label, summary_type, 'summary')}.md"
+                    st.download_button(
+                        "Download summary (.md)",
+                        data=summary.encode("utf-8"),
+                        file_name=filename,
+                        mime="text/markdown"
+                    )
+            
+            st.subheader("❓ Generate Questions")
+            
+            col_qtype, col_diff, col_count = st.columns(3)
+            
+            with col_qtype:
+                question_type = st.selectbox("Question Type", QUIZ_TYPES)
+            
+            with col_diff:
+                difficulty = st.selectbox("Difficulty", QUIZ_DIFFICULTY_LEVELS)
+            
+            with col_count:
+                question_count = st.slider("Number of Questions", 1, 10, 5)
+            
+            if st.button("Generate Questions"):
+                with st.spinner("Generating questions..."):
+                    questions = st.session_state.ai_helpers.generate_questions(
+                        relevant_docs, question_type, difficulty, question_count
+                    )
                     
-                    if st.button("Generate Summary"):
-                        with st.spinner("Generating summary..."):
-                            summary = st.session_state.ai_helpers.generate_summary(
-                                relevant_docs, summary_type
-                            )
-                            st.markdown("### Generated Summary")
-                            st.write(summary)
-                    
-                    # Question generation
-                    st.subheader("❓ Generate Questions")
-                    
-                    col_qtype, col_diff, col_count = st.columns(3)
-                    
-                    with col_qtype:
-                        question_type = st.selectbox("Question Type", QUIZ_TYPES)
-                    
-                    with col_diff:
-                        difficulty = st.selectbox("Difficulty", QUIZ_DIFFICULTY_LEVELS)
-                    
-                    with col_count:
-                        question_count = st.slider("Number of Questions", 1, 10, 5)
-                    
-                    if st.button("Generate Questions"):
-                        with st.spinner("Generating questions..."):
-                            questions = st.session_state.ai_helpers.generate_questions(
-                                relevant_docs, question_type, difficulty, question_count
-                            )
-                            
-                            if questions:
-                                st.markdown("### Generated Questions")
-                                for i, q in enumerate(questions, 1):
-                                    st.write(f"**Q{i}:** {q.get('question', 'N/A')}")
-                                    if 'options' in q:
-                                        for opt, val in q['options'].items():
-                                            st.write(f"  {opt}. {val}")
-                                    if 'answer' in q:
-                                        with st.expander(f"Answer {i}"):
-                                            st.write(q['answer'])
-                                    if 'explanation' in q:
-                                        with st.expander(f"Explanation {i}"):
-                                            st.write(q['explanation'])
-                                    st.write("---")
-                else:
-                    st.warning("No content found for the selected filters.")
+                    if questions:
+                        st.markdown("### Generated Questions")
+                        for i, q in enumerate(questions, 1):
+                            st.write(f"**Q{i}:** {q.get('question', 'N/A')}")
+                            if 'options' in q:
+                                for opt, val in q['options'].items():
+                                    st.write(f"  {opt}. {val}")
+                            if 'answer' in q:
+                                with st.expander(f"Answer {i}"):
+                                    st.write(q['answer'])
+                            if 'explanation' in q:
+                                with st.expander(f"Explanation {i}"):
+                                    st.write(q['explanation'])
+                            st.write("---")
+                        
+                        st.session_state.saved_question_sets.append({
+                            "focus": focus_label,
+                            "document_ids": selected_doc_ids,
+                            "question_type": question_type,
+                            "difficulty": difficulty,
+                            "questions": questions,
+                            "generated_at": datetime.now().isoformat()
+                        })
+                        
+                        questions_md = format_questions_markdown(questions)
+                        q_filename = f"{sanitize_filename(focus_label, question_type, difficulty, 'questions')}.md"
+                        st.download_button(
+                            "Download questions (.md)",
+                            data=questions_md.encode("utf-8"),
+                            file_name=q_filename,
+                            mime="text/markdown"
+                        )
+        else:
+            st.warning("No relevant content found. Try adjusting your study description or upload more materials.")
 
 # Quiz Mode Page
 elif selected == "❓ Quiz Mode":
     st.title("❓ Interactive Quiz Mode")
     
-    subjects = st.session_state.vector_store.get_all_subjects()
+    library_data = st.session_state.vector_store.get_document_library()
+    doc_lookup = {
+        f"{entry['Document']} ({entry['Document ID']})": entry["Document ID"]
+        for entry in library_data
+        if entry.get("Document ID")
+    }
     
-    if not subjects:
-        st.warning("No documents uploaded yet. Please upload some PDFs first.")
+    if not library_data:
+        st.warning("No documents uploaded yet. Please upload some PDFs or add notes first.")
     else:
         col1, col2 = st.columns([1, 2])
         
         with col1:
-            quiz_subject = st.selectbox("Quiz Subject", subjects, key="quiz_subject")
-            topics = st.session_state.vector_store.get_topics_by_subject(quiz_subject)
-            quiz_topic = st.selectbox("Quiz Topic", topics, key="quiz_topic") if topics else None
+            quiz_focus = st.text_input(
+                "What should the quiz cover?",
+                value="General review of my materials",
+                key="quiz_focus"
+            )
             
-            if quiz_topic:
-                chapters = st.session_state.vector_store.get_chapters_by_topic(quiz_subject, quiz_topic)
-                quiz_chapter = st.selectbox("Quiz Chapter", chapters, key="quiz_chapter") if chapters else None
-            else:
-                quiz_chapter = None
+            quiz_doc_labels = st.multiselect(
+                "Limit to uploads (optional)",
+                options=list(doc_lookup.keys()),
+                key="quiz_docs"
+            )
+            quiz_doc_ids = [doc_lookup[label] for label in quiz_doc_labels]
             
             quiz_difficulty = st.selectbox("Difficulty", QUIZ_DIFFICULTY_LEVELS, key="quiz_difficulty")
             quiz_type = st.selectbox("Question Type", QUIZ_TYPES, key="quiz_type")
@@ -284,19 +430,8 @@ elif selected == "❓ Quiz Mode":
         
         with col2:
             if st.button("Start Quiz", key="start_quiz"):
-                if quiz_subject and quiz_topic and quiz_chapter:
-                    # Generate quiz questions
-                    filter_dict = {
-                        "subject": quiz_subject,
-                        "topic": quiz_topic,
-                        "chapter": quiz_chapter
-                    }
-                    
-                    relevant_docs = st.session_state.vector_store.search_similar(
-                        f"{quiz_subject} {quiz_topic} {quiz_chapter}",
-                        k=10,
-                        filter_dict=filter_dict
-                    )
+                if quiz_focus.strip():
+                    relevant_docs = get_relevant_documents(quiz_focus, document_ids=quiz_doc_ids, k=10)
                     
                     if relevant_docs:
                         with st.spinner("Generating quiz..."):
@@ -310,21 +445,22 @@ elif selected == "❓ Quiz Mode":
                                 "answers": {},
                                 "start_time": datetime.now(),
                                 "time_limit": time_limit,
-                                "subject": quiz_subject,
-                                "topic": quiz_topic,
-                                "chapter": quiz_chapter
+                                "focus": quiz_focus.strip(),
+                                "document_ids": quiz_doc_ids
                             }
                             st.rerun()
+                        else:
+                            st.error("Unable to generate quiz questions. Please try again.")
                     else:
-                        st.error("No content found for quiz generation.")
+                        st.error("No content found for quiz generation. Try a different description or upload more materials.")
                 else:
-                    st.error("Please select subject, topic, and chapter.")
+                    st.error("Please describe what the quiz should cover.")
         
         # Display current quiz
         if 'current_quiz' in st.session_state:
             quiz = st.session_state.current_quiz
             
-            st.subheader(f"Quiz: {quiz['subject']} - {quiz['topic']} - {quiz['chapter']}")
+            st.subheader(f"Quiz Focus: {quiz['focus']}")
             
             # Timer display
             if quiz['time_limit']:
@@ -371,14 +507,12 @@ elif selected == "❓ Quiz Mode":
                         # For open-ended questions, we'll mark as correct for now
                         # In a real app, you'd want more sophisticated scoring
                     
-                    score = (correct / total) * 100
+                    score = (correct / total) * 100 if total else 0
                     
                     # Save result
                     result = {
                         "timestamp": datetime.now().isoformat(),
-                        "subject": quiz['subject'],
-                        "topic": quiz['topic'],
-                        "chapter": quiz['chapter'],
+                        "focus": quiz['focus'],
                         "score": score,
                         "total_questions": total,
                         "correct_answers": correct
@@ -452,40 +586,37 @@ elif selected == "💬 Ask Questions":
 elif selected == "🃏 Flashcards":
     st.title("🃏 Flashcards")
     
-    subjects = st.session_state.vector_store.get_all_subjects()
+    library_data = st.session_state.vector_store.get_document_library()
+    doc_lookup = {
+        f"{entry['Document']} ({entry['Document ID']})": entry["Document ID"]
+        for entry in library_data
+        if entry.get("Document ID")
+    }
     
-    if not subjects:
-        st.warning("No documents uploaded yet. Please upload some PDFs first.")
+    if not library_data:
+        st.warning("No documents uploaded yet. Please upload some PDFs or add notes first.")
     else:
         col1, col2 = st.columns([1, 2])
         
         with col1:
-            flashcard_subject = st.selectbox("Subject", subjects, key="flashcard_subject")
-            topics = st.session_state.vector_store.get_topics_by_subject(flashcard_subject)
-            flashcard_topic = st.selectbox("Topic", topics, key="flashcard_topic") if topics else None
+            flashcard_focus = st.text_input(
+                "What should the flashcards cover?",
+                value="Key facts to remember",
+                key="flashcard_focus"
+            )
             
-            if flashcard_topic:
-                chapters = st.session_state.vector_store.get_chapters_by_topic(flashcard_subject, flashcard_topic)
-                flashcard_chapter = st.selectbox("Chapter", chapters, key="flashcard_chapter") if chapters else None
-            else:
-                flashcard_chapter = None
+            flashcard_doc_labels = st.multiselect(
+                "Limit to uploads (optional)",
+                options=list(doc_lookup.keys()),
+                key="flashcard_docs"
+            )
+            flashcard_doc_ids = [doc_lookup[label] for label in flashcard_doc_labels]
             
             flashcard_count = st.slider("Number of Flashcards", 5, 20, 10, key="flashcard_count")
             
             if st.button("Generate Flashcards", key="generate_flashcards"):
-                if flashcard_subject and flashcard_topic and flashcard_chapter:
-                    # Get relevant documents
-                    filter_dict = {
-                        "subject": flashcard_subject,
-                        "topic": flashcard_topic,
-                        "chapter": flashcard_chapter
-                    }
-                    
-                    relevant_docs = st.session_state.vector_store.search_similar(
-                        f"{flashcard_subject} {flashcard_topic} {flashcard_chapter}",
-                        k=10,
-                        filter_dict=filter_dict
-                    )
+                if flashcard_focus.strip():
+                    relevant_docs = get_relevant_documents(flashcard_focus, document_ids=flashcard_doc_ids, k=10)
                     
                     if relevant_docs:
                         with st.spinner("Generating flashcards..."):
@@ -497,11 +628,14 @@ elif selected == "🃏 Flashcards":
                             st.session_state.current_flashcards = flashcards
                             st.session_state.flashcard_index = 0
                             st.session_state.show_answer = False
+                            st.session_state.current_flashcard_focus = flashcard_focus.strip()
                             st.rerun()
+                        else:
+                            st.error("Unable to generate flashcards. Please try again.")
                     else:
-                        st.error("No content found for flashcard generation.")
+                        st.error("No content found for flashcard generation. Try a different description or upload more materials.")
                 else:
-                    st.error("Please select subject, topic, and chapter.")
+                    st.error("Please describe what the flashcards should cover.")
         
         with col2:
             if 'current_flashcards' in st.session_state:
@@ -513,6 +647,8 @@ elif selected == "🃏 Flashcards":
                     current_card = flashcards[current_index]
                     
                     st.subheader(f"Flashcard {current_index + 1} of {len(flashcards)}")
+                    if st.session_state.get("current_flashcard_focus"):
+                        st.caption(f"Focus: {st.session_state.current_flashcard_focus}")
                     
                     # Progress bar
                     progress = (current_index + 1) / len(flashcards)
@@ -541,7 +677,7 @@ elif selected == "🃏 Flashcards":
                                     st.session_state.show_answer = False
                                     st.rerun()
                     else:
-                        if st.button("Show Answer", key="show_answer"):
+                        if st.button("Show Answer", key="show_answer_btn"):
                             st.session_state.show_answer = True
                             st.rerun()
                 else:
@@ -559,35 +695,32 @@ elif selected == "📊 Progress":
     if st.session_state.quiz_results:
         st.subheader("📈 Quiz Performance")
         
-        # Convert to DataFrame for better visualization
-        import pandas as pd
-        
         df = pd.DataFrame(st.session_state.quiz_results)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
+        if 'focus' not in df.columns:
+            df['focus'] = "General Focus"
         
         # Recent quizzes
         st.write("**Recent Quiz Results:**")
         recent_quizzes = df.tail(10)
         
         for _, quiz in recent_quizzes.iterrows():
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Subject", quiz['subject'])
+                st.write(f"**Focus:** {quiz.get('focus', 'General Focus')}")
             with col2:
                 st.metric("Score", f"{quiz['score']:.1f}%")
             with col3:
                 st.metric("Questions", f"{quiz['correct_answers']}/{quiz['total_questions']}")
-            with col4:
-                st.metric("Date", quiz['timestamp'].strftime("%m/%d"))
+            st.caption(f"Completed on {quiz['timestamp'].strftime('%m/%d %H:%M')}")
             st.write("---")
         
-        # Performance by subject
         if len(df) > 1:
-            st.subheader("📊 Performance by Subject")
-            subject_scores = df.groupby('subject')['score'].mean().sort_values(ascending=False)
+            st.subheader("📊 Average Score by Focus")
+            focus_scores = df.groupby('focus')['score'].mean().sort_values(ascending=False)
             
-            for subject, avg_score in subject_scores.items():
-                st.write(f"**{subject}:** {avg_score:.1f}% average")
+            for focus, avg_score in focus_scores.items():
+                st.write(f"**{focus}:** {avg_score:.1f}% average")
     else:
         st.info("No quiz results yet. Take some quizzes to see your progress here!")
     
@@ -598,20 +731,91 @@ elif selected == "📊 Progress":
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("Total Documents", stats['total_documents'])
+        st.metric("Total Documents", stats.get('total_documents', 0))
     
     with col2:
-        st.metric("Subjects Studied", stats['total_subjects'])
+        st.metric("Total Chunks", stats.get('total_chunks', 0))
     
     with col3:
         st.metric("Quizzes Taken", len(st.session_state.quiz_results))
+
+    st.subheader("🗓️ Study Planner")
+    with st.form("study_plan_form", clear_on_submit=True):
+        plan_title = st.text_input("Goal / Activity", value="Review key concepts")
+        plan_focus = st.text_input("Focus Area / Notes", value="General focus", key="plan_focus_input")
+        plan_due = st.date_input("Target Date", datetime.now().date())
+        plan_goal_type = st.selectbox("Goal Type", ["Summary", "Quiz", "Flashcards", "Reading", "Notes"], key="plan_goal_type")
+        plan_notes = st.text_area("Notes (optional)", key="plan_notes")
+        submit_plan = st.form_submit_button("Add to Planner")
     
-    # Subject breakdown
-    if stats['subjects']:
-        st.subheader("📖 Subjects in Your Library")
-        for subject in stats['subjects']:
-            topics = st.session_state.vector_store.get_topics_by_subject(subject)
-            st.write(f"**{subject}:** {len(topics)} topics")
+    if submit_plan:
+        st.session_state.study_plan.append({
+            "title": plan_title,
+            "focus": plan_focus,
+            "due": plan_due.isoformat(),
+            "goal_type": plan_goal_type,
+            "notes": plan_notes,
+            "status": "Pending",
+            "created_at": datetime.now().isoformat()
+        })
+        st.success("🗂️ Study goal added!")
+    
+    if st.session_state.study_plan:
+        remove_indices = []
+        for idx, plan in enumerate(st.session_state.study_plan):
+            col_title, col_meta, col_status, col_actions = st.columns([3, 2, 1, 1])
+            col_title.markdown(f"**{plan['title']}**  \n{plan.get('notes') or 'No extra notes'}")
+            col_meta.write(f"Focus: {plan.get('focus', 'General focus')}")
+            col_meta.write(f"Due: {plan['due']}")
+            completed = col_status.checkbox(
+                "Done",
+                value=plan['status'] == "Done",
+                key=f"plan_done_{idx}"
+            )
+            plan['status'] = "Done" if completed else "Pending"
+            if col_actions.button("Remove", key=f"plan_remove_{idx}"):
+                remove_indices.append(idx)
+            col_actions.write(f"Status: {plan['status']}")
+            st.write("---")
+        
+        for idx in sorted(remove_indices, reverse=True):
+            st.session_state.study_plan.pop(idx)
+    else:
+        st.info("Create your first study goal to start planning!")
+    
+    st.subheader("📝 Saved Summaries & Question Sets")
+    summaries_tab, questions_tab = st.tabs(["Summaries", "Question Sets"])
+    
+    with summaries_tab:
+        if st.session_state.saved_summaries:
+            for entry in reversed(st.session_state.saved_summaries[-5:]):
+                label = f"{entry['summary_type']} – {entry.get('focus', 'General Focus')}"
+                with st.expander(label):
+                    st.write(entry['content'])
+                    st.caption(f"Generated on {entry['generated_at']}")
+        else:
+            st.info("No summaries saved yet. Generate one from the Study Tools page.")
+    
+    with questions_tab:
+        if st.session_state.saved_question_sets:
+            for entry in reversed(st.session_state.saved_question_sets[-5:]):
+                label = f"{entry['question_type']} ({entry['difficulty']}) – {entry.get('focus', 'General Focus')}"
+                with st.expander(label):
+                    for i, question in enumerate(entry['questions'], 1):
+                        st.write(f"**Q{i}:** {question.get('question', 'N/A')}")
+                        if 'options' in question:
+                            for opt, text in question['options'].items():
+                                st.write(f"- {opt}. {text}")
+                        if 'answer' in question:
+                            st.write(f"**Answer:** {question['answer']}")
+                        if 'correct_answer' in question:
+                            st.write(f"**Correct Answer:** {question['correct_answer']}")
+                        if 'explanation' in question:
+                            st.write(f"**Explanation:** {question['explanation']}")
+                        st.write("")
+                    st.caption(f"Generated on {entry['generated_at']}")
+        else:
+            st.info("No question sets saved yet. Generate some from Study Tools.")
 
 # Footer
 st.markdown("---")

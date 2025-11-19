@@ -198,7 +198,7 @@ class AIHelpers:
         
         content = "\n\n".join([doc.page_content for doc in documents])
         
-        prompt = f"""
+        prompt = """
         Generate {count} flashcards based on the following content.
         Each flashcard should have a clear question on the front and a concise answer on the back.
         
