@@ -11,6 +11,14 @@ from utils.vector_store import VectorStoreManager
 from utils.ai_helpers import AIHelpers
 from config import *
 
+# Page configuration (must be the first Streamlit call)
+st.set_page_config(
+    page_title=APP_TITLE,
+    page_icon=APP_ICON,
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 # Resolve OpenAI API key: Streamlit secrets → env var → config.py
 resolved_api_key = None
 try:
@@ -24,14 +32,6 @@ if not resolved_api_key:
 
 if resolved_api_key:
     os.environ["OPENAI_API_KEY"] = resolved_api_key
-
-# Page configuration
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon=APP_ICON,
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 # Initialize session state
 if 'vector_store' not in st.session_state:

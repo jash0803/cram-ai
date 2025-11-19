@@ -4,7 +4,7 @@ from typing import List, Dict, Any
 import faiss
 import numpy as np
 from langchain_openai import OpenAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
 import streamlit as st
